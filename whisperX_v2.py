@@ -2,59 +2,40 @@ import os
 import sys
 import threading
 import torch
+import torchaudio
 from faster_whisper import WhisperModel
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from tkinter import filedialog, messagebox, StringVar
 
 app = ttk.Window(themename="superhero")
-app.title("Whisper 智慧影音轉檔與 Vistitle 精準斷句工具")
-app.geometry("680x600")
+app.title("Whisper 智慧影音轉檔與進度追蹤工具")
+app.geometry("680x620")
 app.resizable(False, False)
 
 audio_file_path = ""
 output_folder_path = ""
 
-def format_timecode_dropframe(seconds):
-    """
-    將秒數轉換為 Edius Vistitle 專用的 Drop Frame 格式 (HH:MM:SS;FF)
-    以 29.97 fps (NTSC Drop Frame) 進行精確換算
-    """
-    fps = 29.97
-    total_frames = int(round(seconds * fps))
-    
-    f = total_frames % 30
-    total_seconds = total_frames // 30
-    s = total_seconds % 60
-    m = (total_seconds // 60) % 60
-    h = total_seconds // 3600
-    
-    return f"{h:02d}:{m:02d}:{s:02d};{f:02d}"
+# 語言下拉選單：清楚顯示中文名稱與代碼
+LANGUAGES = {
+    "中文 (zh)": "zh",
+    "英文 (en)": "en",
+    "日文 (ja)": "ja",
+    "西班牙文 (es)": "es",
+    "法文 (fr)": "fr",
+    "德文 (de)": "de",
+    "義大利文 (it)": "it",
+    "印地文 / 尼泊爾語 (hi)": "hi",
+    "印尼文 (id)": "id",
+    "AUTO 自動判讀 (auto)": "auto"
+}
 
-def split_text_into_chunks(text, max_chars=14):
-    """
-    將過長的句子自動切成適合 Vistitle 字幕顯示的短句 (預設每段約 14 字左右)
-    """
-    text = text.strip()
-    if not text:
-        return []
-    
-    # 根據常見標點符號先初步切分
-    import re
-    raw_parts = re.split(r'([，、。！？,\?!])', text)
-    
-    sentences = []
-    current = ""
-    for part in raw_parts:
-        current += part
-        if len(current) >= max_chars or part in ['，', '、', '。', '！', '？', ',', '!', '?']:
-            if current.strip():
-                sentences.append(current.strip())
-            current = ""
-    if current.strip():
-        sentences.append(current.strip())
-        
-    return [s for s in sentences if s]
+def format_timecode(seconds):
+    """標準時間碼格式 (HH:MM:SS)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 def choose_file():
     global audio_file_path
@@ -82,23 +63,33 @@ def run_process():
         messagebox.showwarning("提醒", "請先完整選擇『音訊檔案』與『輸出資料夾』！")
         return
 
-    model_size = model_var.get()
-    selected_lang = lang_var.get().strip()
-    language_param = None if selected_lang in ["auto", "自動偵測", ""] else selected_lang
+    selected_display_lang = lang_var.get()
+    language_code = LANGUAGES.get(selected_display_lang, "auto")
+    language_param = None if language_code == "auto" else language_code
 
-    status_label.config(text="連線中：正在載入 AI 模型...", bootstyle="warning")
+    model_size = model_var.get()
+
+    status_label.config(text="正在分析音訊檔案長度...", bootstyle="warning")
     app.update_idletasks()
+
+    try:
+        info_audio = torchaudio.info(audio_file_path)
+        total_duration = info_audio.num_frames / info_audio.sample_rate
+    except Exception:
+        total_duration = 0
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
 
-        status_label.config(text=f"正在初始化 Whisper 模型 ({model_size})...", bootstyle="info")
+        status_label.config(text=f"正在載入 AI 模型 ({model_size})...", bootstyle="info")
+        progress_bar['value'] = 10
         app.update_idletasks()
         
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-        status_label.config(text="辨識中：正在進行語音轉文字與時間碼對齊...", bootstyle="info")
+        status_label.config(text="辨識中：AI 正在轉寫語音內容...", bootstyle="info")
+        progress_bar['value'] = 20
         app.update_idletasks()
         
         segments, info = model.transcribe(
@@ -108,97 +99,105 @@ def run_process():
         )
 
         base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
-        
         output_txt = os.path.join(output_folder_path, f"{base_name}_transcript.txt")
-        output_vistitle = os.path.join(output_folder_path, f"{base_name}_vistitle_dropframe.txt")
+        output_timecode = os.path.join(output_folder_path, f"{base_name}_timecode.txt")
         
-        status_label.config(text="正在進行智慧斷句與 Vistitle 格式轉換...", bootstyle="info")
-        app.update_idletasks()
-        
-        with open(output_txt, "w", encoding="utf-8") as f_norm, \
-             open(output_vistitle, "w", encoding="utf-8") as f_vis:
-            
-            for segment in segments:
-                start_sec = segment.start
-                end_sec = segment.end
-                full_text = segment.text.strip()
-                
-                # 寫入一般純逐字稿
-                f_norm.write(f"{full_text}\n")
-                
-                # 智慧斷句處理
-                sub_chunks = split_text_into_chunks(full_text)
-                if not sub_chunks:
-                    continue
-                
-                duration = end_sec - start_sec
-                time_per_char = duration / max(len(full_text), 1)
-                
-                chunk_start = start_sec
-                for chunk in sub_chunks:
-                    chunk_duration = len(chunk) * time_per_char
-                    chunk_end = chunk_start + chunk_duration
-                    
-                    # 確保不超過原區段結束時間
-                    if chunk_end > end_sec:
-                        chunk_end = end_sec
-                        
-                    start_df = format_timecode_dropframe(chunk_start)
-                    end_df = format_timecode_dropframe(chunk_end)
-                    
-                    # 寫入 Vistitle 專用檔格式
-                    f_vis.write(f"{start_df} {end_df} {chunk}\n")
-                    chunk_start = chunk_end
+        all_segments = []
+        for seg in segments:
+            all_segments.append(seg)
 
+        status_label.config(text="正在產出兩種格式的文字檔案...", bootstyle="info")
+        progress_bar['value'] = 90
+        app.update_idletasks()
+
+        with open(output_txt, "w", encoding="utf-8") as f_pure, \
+             open(output_timecode, "w", encoding="utf-8") as f_tc:
+            
+            for segment in all_segments:
+                start_str = format_timecode(segment.start)
+                end_str = format_timecode(segment.end)
+                text = segment.text.strip()
+                
+                # 1. 純文字逐字稿
+                f_pure.write(f"{text}\n")
+                # 2. 帶標準時間碼 TXT
+                f_tc.write(f"[{start_str} --> {end_str}] {text}\n")
+
+                if total_duration > 0:
+                    pct = min(95, 20 + int((segment.end / total_duration) * 75))
+                    progress_bar['value'] = pct
+                    percent_label.config(text=f"處理進度：{pct}%")
+                    app.update_idletasks()
+
+        progress_bar['value'] = 100
+        percent_label.config(text="處理進度：100%")
         status_label.config(text="全部處理完成！", bootstyle="success")
-        messagebox.showinfo("成功", f"檔案已順利產出！\n\n1. 純文字逐字稿：\n{output_txt}\n\n2. Vistitle 專用精準斷句檔：\n{output_vistitle}")
+        
+        messagebox.showinfo("成功", f"檔案已順利產出！\n\n1. 純文字逐字稿：\n{output_txt}\n\n2. 標準帶時間碼檔：\n{output_timecode}")
 
     except Exception as e:
         status_label.config(text="處理失敗發生錯誤", bootstyle="danger")
         messagebox.showerror("錯誤", f"執行過程中發生例外狀況：\n{str(e)}")
 
 def start_thread():
+    progress_bar['value'] = 0
+    percent_label.config(text="處理進度：0%")
     threading.Thread(target=run_process, daemon=True).start()
 
 # --- 介面排版 ---
-header_frame = ttk.Frame(app, padding=20)
+header_frame = ttk.Frame(app, padding=15)
 header_frame.pack(fill=X)
 
-title_label = ttk.Label(header_frame, text="✨ Whisper 智慧轉檔與 Vistitle 斷句工具", font=("Microsoft JhengHei UI", 16, "bold"), bootstyle="inverse-primary")
+title_label = ttk.Label(header_frame, text="✨ Whisper 影音智慧轉檔工具", font=("Microsoft JhengHei UI", 16, "bold"), bootstyle="inverse-primary")
 title_label.pack(pady=5)
 
-content_frame = ttk.Frame(app, padding=20)
+content_frame = ttk.Frame(app, padding=15)
 content_frame.pack(fill=BOTH, expand=True)
 
 btn_file = ttk.Button(content_frame, text="📁 選擇音訊或影片檔案 (MP3/WAV/MP4)", command=choose_file, bootstyle="info-outline", width=45)
-btn_file.pack(pady=10)
-source_label = ttk.Label(content_frame, text="尚未選擇來源檔案", font=("Microsoft JhengHei UI", 10), bootstyle="secondary")
-source_label.pack(pady=5)
+btn_file.pack(pady=8)
+source_label = ttk.Label(content_frame, text="尚未選擇來源檔案", font=("Microsoft JhengHei UI", 9), bootstyle="secondary")
+source_label.pack(pady=2)
 
 btn_folder = ttk.Button(content_frame, text="📂 選擇輸出資料夾", command=choose_output_folder, bootstyle="info-outline", width=45)
-btn_folder.pack(pady=15)
-output_label = ttk.Label(content_frame, text="尚未選擇輸出資料夾", font=("Microsoft JhengHei UI", 10), bootstyle="secondary")
-output_label.pack(pady=5)
+btn_folder.pack(pady=10)
+output_label = ttk.Label(content_frame, text="尚未選擇輸出資料夾", font=("Microsoft JhengHei UI", 9), bootstyle="secondary")
+output_label.pack(pady=2)
 
-settings_frame = ttk.Labelframe(content_frame, text=" 進階參數設定 ", padding=15, bootstyle="primary")
-settings_frame.pack(fill=X, pady=15)
+# 進階設定區
+settings_frame = ttk.Labelframe(content_frame, text=" 進階參數設定 ", padding=12, bootstyle="primary")
+settings_frame.pack(fill=X, pady=10)
 
-lbl_model = ttk.Label(settings_frame, text="選擇 AI 模型大小:", font=("Microsoft JhengHei UI", 10))
+model_frame = ttk.Frame(settings_frame)
+model_frame.pack(fill=X, pady=5)
+lbl_model = ttk.Label(model_frame, text="AI 模型大小:", font=("Microsoft JhengHei UI", 9), width=12)
 lbl_model.pack(side=LEFT, padx=5)
 model_var = StringVar(value="base")
-model_combo = ttk.Combobox(settings_frame, textvariable=model_var, values=["tiny", "base", "small", "medium", "large-v3"], width=12, state="readonly")
+model_combo = ttk.Combobox(model_frame, textvariable=model_var, values=["tiny", "base", "small", "medium", "large-v3"], width=22, state="readonly")
 model_combo.pack(side=LEFT, padx=5)
 
-lbl_lang = ttk.Label(settings_frame, text="語言:", font=("Microsoft JhengHei UI", 10))
-lbl_lang.pack(side=LEFT, padx=(15, 5))
-lang_var = StringVar(value="zh")
-lang_entry = ttk.Entry(settings_frame, textvariable=lang_var, width=8)
-lang_entry.pack(side=LEFT, padx=5)
+lang_frame = ttk.Frame(settings_frame)
+lang_frame.pack(fill=X, pady=5)
+lbl_lang = ttk.Label(lang_frame, text="辨識語言:", font=("Microsoft JhengHei UI", 9), width=12)
+lbl_lang.pack(side=LEFT, padx=5)
+lang_var = StringVar(value="中文 (zh)")
+lang_combo = ttk.Combobox(lang_frame, textvariable=lang_var, values=list(LANGUAGES.keys()), width=22, state="readonly")
+lang_combo.pack(side=LEFT, padx=5)
 
-status_label = ttk.Label(content_frame, text="系統整備完成，隨時可以開始", font=("Microsoft JhengHei UI", 11, "bold"), bootstyle="primary")
-status_label.pack(pady=10)
+# 進度條與狀態顯示區
+progress_frame = ttk.Frame(content_frame, padding=5)
+progress_frame.pack(fill=X, pady=10)
 
-btn_start = ttk.Button(content_frame, text="🚀 開始執行精準斷句與轉檔", command=start_thread, bootstyle="success", width=40, cursor="hand2")
-btn_start.pack(pady=15)
+status_label = ttk.Label(progress_frame, text="系統整備完成，隨時可以開始", font=("Microsoft JhengHei UI", 10, "bold"), bootstyle="primary")
+status_label.pack(anchor="w", pady=2)
+
+progress_bar = ttk.Progressbar(progress_frame, orient=HORIZONTAL, length=600, mode='determinate', bootstyle="success-striped")
+progress_bar.pack(fill=X, pady=5)
+
+percent_label = ttk.Label(progress_frame, text="處理進度：0%", font=("Microsoft JhengHei UI", 9), bootstyle="info")
+percent_label.pack(anchor="e", pady=2)
+
+btn_start = ttk.Button(content_frame, text="🚀 開始執行智慧辨識與轉檔", command=start_thread, bootstyle="success", width=40, cursor="hand2")
+btn_start.pack(pady=8)
 
 app.mainloop()
