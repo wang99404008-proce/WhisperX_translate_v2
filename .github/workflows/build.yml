@@ -1,4 +1,4 @@
-name: Build Media Converter App
+name: Build Windows Exe
 
 on:
   push:
@@ -10,25 +10,27 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: 讀取專案程式碼
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+    - name: 設定 Python 環境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: 安裝必要套件與 PyTorch (CPU版本)
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        python -m pip install faster-whisper ttkbootstrap pyinstaller
 
-      - name: Build with PyInstaller
-        run: |
-          pyinstaller --noconsole --onefile --name="MediaConverterTool" media_converter_app.py
+    - name: 開始使用 PyInstaller 打包 .exe
+      run: |
+        python -m PyInstaller --noconsole --onefile --name="WhisperVistitleTranslator" whisperx_app.py
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows-MediaConverter-Exe
-          path: dist/*.exe
+    - name: 上傳打包好的 .exe 檔案供下載
+      uses: actions/upload-artifact@v4
+      with:
+        name: WhisperVistitleTranslator-Exe
+        path: dist/WhisperVistitleTranslator.exe
