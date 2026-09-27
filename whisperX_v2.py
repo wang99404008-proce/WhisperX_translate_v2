@@ -7,9 +7,8 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from tkinter import filedialog, messagebox, StringVar
 
-# 初始化鮮豔的主題介面
 app = ttk.Window(themename="superhero")
-app.title("Whisper 智慧影音轉檔工具 (純文字檔 + Vistitle 雙格式)")
+app.title("Whisper 智慧影音轉檔與 Vistitle 精準斷句工具")
 app.geometry("680x600")
 app.resizable(False, False)
 
@@ -31,6 +30,31 @@ def format_timecode_dropframe(seconds):
     h = total_seconds // 3600
     
     return f"{h:02d}:{m:02d}:{s:02d};{f:02d}"
+
+def split_text_into_chunks(text, max_chars=14):
+    """
+    將過長的句子自動切成適合 Vistitle 字幕顯示的短句 (預設每段約 14 字左右)
+    """
+    text = text.strip()
+    if not text:
+        return []
+    
+    # 根據常見標點符號先初步切分
+    import re
+    raw_parts = re.split(r'([，、。！？,\?!])', text)
+    
+    sentences = []
+    current = ""
+    for part in raw_parts:
+        current += part
+        if len(current) >= max_chars or part in ['，', '、', '。', '！', '？', ',', '!', '?']:
+            if current.strip():
+                sentences.append(current.strip())
+            current = ""
+    if current.strip():
+        sentences.append(current.strip())
+        
+    return [s for s in sentences if s]
 
 def choose_file():
     global audio_file_path
@@ -62,7 +86,7 @@ def run_process():
     selected_lang = lang_var.get().strip()
     language_param = None if selected_lang in ["auto", "自動偵測", ""] else selected_lang
 
-    status_label.config(text="連線中：正在自動下載/載入 AI 模型...", bootstyle="warning")
+    status_label.config(text="連線中：正在載入 AI 模型...", bootstyle="warning")
     app.update_idletasks()
 
     try:
@@ -74,7 +98,7 @@ def run_process():
         
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-        status_label.config(text="辨識中：正在進行語音轉文字...", bootstyle="info")
+        status_label.config(text="辨識中：正在進行語音轉文字與時間碼對齊...", bootstyle="info")
         app.update_idletasks()
         
         segments, info = model.transcribe(
@@ -85,12 +109,10 @@ def run_process():
 
         base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
         
-        # 輸出 1：純逐字稿 TXT (完全不要時間碼)
         output_txt = os.path.join(output_folder_path, f"{base_name}_transcript.txt")
-        # 輸出 2：Edius Vistitle 專用 Drop Frame TXT
         output_vistitle = os.path.join(output_folder_path, f"{base_name}_vistitle_dropframe.txt")
         
-        status_label.config(text="正在產生兩種格式的文字檔案...", bootstyle="info")
+        status_label.config(text="正在進行智慧斷句與 Vistitle 格式轉換...", bootstyle="info")
         app.update_idletasks()
         
         with open(output_txt, "w", encoding="utf-8") as f_norm, \
@@ -99,18 +121,37 @@ def run_process():
             for segment in segments:
                 start_sec = segment.start
                 end_sec = segment.end
-                text = segment.text.strip()
+                full_text = segment.text.strip()
                 
-                # 寫入純逐字稿 (無時間碼，每句一行)
-                f_norm.write(f"{text}\n")
+                # 寫入一般純逐字稿
+                f_norm.write(f"{full_text}\n")
                 
-                # 寫入 Vistitle Drop Frame 格式
-                start_df = format_timecode_dropframe(start_sec)
-                end_df = format_timecode_dropframe(end_sec)
-                f_vis.write(f"{start_df} {end_df} {text}\n")
+                # 智慧斷句處理
+                sub_chunks = split_text_into_chunks(full_text)
+                if not sub_chunks:
+                    continue
+                
+                duration = end_sec - start_sec
+                time_per_char = duration / max(len(full_text), 1)
+                
+                chunk_start = start_sec
+                for chunk in sub_chunks:
+                    chunk_duration = len(chunk) * time_per_char
+                    chunk_end = chunk_start + chunk_duration
+                    
+                    # 確保不超過原區段結束時間
+                    if chunk_end > end_sec:
+                        chunk_end = end_sec
+                        
+                    start_df = format_timecode_dropframe(chunk_start)
+                    end_df = format_timecode_dropframe(chunk_end)
+                    
+                    # 寫入 Vistitle 專用檔格式
+                    f_vis.write(f"{start_df} {end_df} {chunk}\n")
+                    chunk_start = chunk_end
 
         status_label.config(text="全部處理完成！", bootstyle="success")
-        messagebox.showinfo("成功", f"檔案已順利產出！\n\n1. 純文字逐字稿：\n{output_txt}\n\n2. Edius Vistitle 專用檔：\n{output_vistitle}")
+        messagebox.showinfo("成功", f"檔案已順利產出！\n\n1. 純文字逐字稿：\n{output_txt}\n\n2. Vistitle 專用精準斷句檔：\n{output_vistitle}")
 
     except Exception as e:
         status_label.config(text="處理失敗發生錯誤", bootstyle="danger")
@@ -119,11 +160,11 @@ def run_process():
 def start_thread():
     threading.Thread(target=run_process, daemon=True).start()
 
-# --- 鮮豔現代化 UI 排版 ---
+# --- 介面排版 ---
 header_frame = ttk.Frame(app, padding=20)
 header_frame.pack(fill=X)
 
-title_label = ttk.Label(header_frame, text="✨ Whisper 影音轉檔與 Vistitle 工具", font=("Microsoft JhengHei UI", 16, "bold"), bootstyle="inverse-primary")
+title_label = ttk.Label(header_frame, text="✨ Whisper 智慧轉檔與 Vistitle 斷句工具", font=("Microsoft JhengHei UI", 16, "bold"), bootstyle="inverse-primary")
 title_label.pack(pady=5)
 
 content_frame = ttk.Frame(app, padding=20)
@@ -157,7 +198,7 @@ lang_entry.pack(side=LEFT, padx=5)
 status_label = ttk.Label(content_frame, text="系統整備完成，隨時可以開始", font=("Microsoft JhengHei UI", 11, "bold"), bootstyle="primary")
 status_label.pack(pady=10)
 
-btn_start = ttk.Button(content_frame, text="🚀 開始執行辨識與雙格式輸出", command=start_thread, bootstyle="success", width=40, cursor="hand2")
+btn_start = ttk.Button(content_frame, text="🚀 開始執行精準斷句與轉檔", command=start_thread, bootstyle="success", width=40, cursor="hand2")
 btn_start.pack(pady=15)
 
 app.mainloop()
